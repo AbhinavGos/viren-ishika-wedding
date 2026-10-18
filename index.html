@@ -39,14 +39,9 @@
   /* MindAR container: fills viewport directly */
   #ar-container{position:fixed;inset:0;width:100vw;height:100vh;overflow:hidden;z-index:0;display:block}
 
-  /* 1-Tap Frictionless Audio & Camera Start Gate */
+  /* Direct Launch: Landing gate hidden */
   #start-prompt {
-    position: fixed; inset: 0; z-index: 40;
-    display: flex; align-items: center; justify-content: center;
-    background: radial-gradient(circle at 50% 50%, rgba(20, 8, 10, 0.82), rgba(10, 4, 6, 0.96));
-    backdrop-filter: blur(10px);
-    cursor: pointer; text-align: center; padding: 24px;
-    transition: opacity 0.35s ease, visibility 0.35s;
+    display: none !important;
   }
   .start-card {
     max-width: 330px; width: 100%;
@@ -188,8 +183,8 @@
   "layout": "carousel",
   "silhouette": "rect",
   "depth": "gold-foil",
-  "anchorPosition": "back-edge",
-  "tiltAngle": 90,
+  "anchorPosition": "center",
+  "tiltAngle": 45,
   "trackingMode": "grounded",
   "targetAspect": 1.25,
   "targetExt": ".jpg",
@@ -712,8 +707,11 @@ function toggleAudio() {
 // ----------------------------------------------------------------------------
 // WEBAR INITIALIZATION & RIGID BASE-GROUNDED 3D SCENE
 // ----------------------------------------------------------------------------
+let isWebARStarted = false;
 async function startWebAR() {
-  startPrompt.style.display = 'none';
+  if (isWebARStarted) return;
+  isWebARStarted = true;
+  if (startPrompt) startPrompt.style.display = 'none';
   loadingView.style.display = 'flex';
   loadStatus.textContent = 'Starting Camera & Card Tracker...';
 
@@ -757,50 +755,25 @@ async function startWebAR() {
     const visualCardWidth = 0.92;
     const visualCardHeight = visualCardWidth * targetAspect;
 
-    // ── PIVOT GROUP: Hinged along the card's top/rear edge ──
+    // ── PIVOT GROUP: Centered hovering above target card ──
     cardPivotGroup = new THREE.Group();
-    if (CONFIG.anchorPosition === 'back-edge') {
-      // Anchored at top edge of physical card resting in user's palm (y = +targetH / 2)
-      cardPivotGroup.position.set(0, targetH / 2, 0.004);
-      // Rotated upright (90°) like a laptop screen / pop-up book opening up from the card
-      const tiltAngleRad = (CONFIG.tiltAngle !== undefined ? CONFIG.tiltAngle : 90) * (Math.PI / 180);
-      cardPivotGroup.rotation.x = tiltAngleRad;
-    } else if (CONFIG.anchorPosition === 'flush') {
-      // Lies flat directly on card surface
-      cardPivotGroup.position.set(0, 0, 0.002);
-      cardPivotGroup.rotation.x = 0;
-    } else {
-      // Centered on card
-      cardPivotGroup.position.set(0, 0, 0.004);
-      const tiltAngleRad = (CONFIG.tiltAngle !== undefined ? CONFIG.tiltAngle : 90) * (Math.PI / 180);
-      cardPivotGroup.rotation.x = tiltAngleRad;
-    }
+    // Centered at (0, 0, 0.05) - hovers cleanly over the visual trigger card
+    cardPivotGroup.position.set(0, 0, 0.05);
+    // Initial ergonomic viewing angle (~45°)
+    cardPivotGroup.rotation.x = 0.785;
     cardRoot.add(cardPivotGroup);
 
-    // ── 1. Contact Ground Shadow on Card Hinge Line ──
-    const shadowGeo = new THREE.PlaneGeometry(visualCardWidth * 1.3, 0.35);
+    // ── 1. Soft Depth Shadow on Card Plane ──
+    const shadowGeo = new THREE.PlaneGeometry(visualCardWidth * 1.5, visualCardHeight * 1.3);
     const shadowMat = new THREE.MeshBasicMaterial({
       map: createContactShadowTexture(),
       transparent: true,
-      opacity: 0.65,
+      opacity: 0.35,
       depthWrite: false
     });
     const shadowMesh = new THREE.Mesh(shadowGeo, shadowMat);
-    // Flat on physical card surface along hinge line
-    shadowMesh.rotation.x = -Math.PI / 2;
     shadowMesh.position.set(0, 0, 0.001);
-    cardPivotGroup.add(shadowMesh);
-
-    // ── 2. Gold Pedestal Bar Along Hinge Line ──
-    const standGeo = new THREE.BoxGeometry(visualCardWidth + 0.04, 0.022, 0.016);
-    const standMat = new THREE.MeshStandardMaterial({
-      color: currentTheme.edgeColor,
-      metalness: 0.88,
-      roughness: 0.22
-    });
-    const standMesh = new THREE.Mesh(standGeo, standMat);
-    standMesh.position.set(0, 0, 0.008);
-    cardPivotGroup.add(standMesh);
+    cardRoot.add(shadowMesh);
 
     // ── 3. Content Presentation (Video AR or Multi-Card Deck) ──
     if (CONFIG.videoUrl) {
@@ -832,7 +805,7 @@ async function startWebAR() {
       // ── B. Multi-Card Deck (Carousel / Triptych / Diorama) ──
       const cardDepth = (CONFIG.depth === 'flat') ? 0.0001 : 0.008;
       const cardGeo = new THREE.BoxGeometry(visualCardWidth, visualCardHeight, cardDepth);
-      cardGeo.translate(0, visualCardHeight / 2, 0);
+      // Centered at (0, 0, 0) so the carousel rotates around the center of the cards
 
       const edgeMat = new THREE.MeshStandardMaterial({
         color: currentTheme.edgeColor,
@@ -951,6 +924,7 @@ async function startWebAR() {
       try {
         if (isTargetFound) {
           if (!CONFIG.videoUrl) {
+            updateViewingAngle();
             updateLayoutAnimation();
             updateStoryProgress();
           }
@@ -969,6 +943,34 @@ async function startWebAR() {
     errorText.textContent = err?.message || 'Could not start camera or AR tracking.';
     errorBox.style.display = 'block';
   }
+}
+
+// ----------------------------------------------------------------------------
+// ADAPTIVE VIEWING ANGLE CONTROLLER
+// Dynamically adjusts pitch so the 3D cards tilt up to face the person watching
+// ----------------------------------------------------------------------------
+const _worldCamPos = new THREE.Vector3();
+const _localCamPos = new THREE.Vector3();
+
+function updateViewingAngle() {
+  if (!isTargetFound || !anchor || !cardPivotGroup || !mindarThree) return;
+
+  mindarThree.camera.getWorldPosition(_worldCamPos);
+  _localCamPos.copy(_worldCamPos);
+  anchor.group.worldToLocal(_localCamPos);
+
+  // In anchor.group coordinates:
+  // (0,0,0) is target center.
+  // _localCamPos.y is vertical offset along the card (negative when camera is below card center).
+  // _localCamPos.z is perpendicular distance from card face (> 0).
+  // The angle from card normal (+Z) to the camera in the Y-Z plane is:
+  const angleToViewer = Math.atan2(-_localCamPos.y, _localCamPos.z);
+
+  // Clamp to ergonomic viewing angles (from ~3° flat up to ~72° steep elevation):
+  const clampedTilt = Math.max(0.05, Math.min(1.25, angleToViewer));
+
+  // Smooth lerp (0.1 factor) so tilt transitions smoothly as the user tilts their phone
+  cardPivotGroup.rotation.x += (clampedTilt - cardPivotGroup.rotation.x) * 0.1;
 }
 
 // ----------------------------------------------------------------------------
@@ -1091,10 +1093,12 @@ function closeAR() {
 }
 
 // Event Listeners
-startBtn.onclick = () => {
-  primeAudio();
-  startWebAR();
-};
+if (startBtn) {
+  startBtn.onclick = () => {
+    primeAudio();
+    startWebAR();
+  };
+}
 prevBtn.onclick = () => setCard(activeIndex - 1);
 nextBtn.onclick = () => setCard(activeIndex + 1);
 closeBtn.onclick = closeAR;
@@ -1123,6 +1127,32 @@ function handleCardTap(e) {
 }
 window.addEventListener('click', handleCardTap);
 window.addEventListener('touchend', handleCardTap);
+
+// Seamless Audio Unlock on First User Touch Gesture
+function primeOrUnlockAudio() {
+  if (CONFIG.audioUrl) {
+    if (!bgAudio) {
+      bgAudio = new Audio(CONFIG.audioUrl);
+      bgAudio.loop = true;
+      bgAudio.volume = 0.85;
+    }
+    if (isTargetFound && !isMuted && bgAudio.paused) {
+      bgAudio.play().then(() => {
+        musicBtn.textContent = '🔊';
+      }).catch(() => {});
+    }
+  }
+}
+window.addEventListener('pointerdown', primeOrUnlockAudio, { passive: true });
+window.addEventListener('touchstart', primeOrUnlockAudio, { passive: true });
+window.addEventListener('click', primeOrUnlockAudio, { passive: true });
+
+// DIRECT LAUNCH: Open immediately into scanning mode (no landing page gate)
+if (document.readyState === 'complete' || document.readyState === 'interactive') {
+  startWebAR();
+} else {
+  window.addEventListener('DOMContentLoaded', startWebAR);
+}
 </script>
 </body>
 </html>
